@@ -1,0 +1,12 @@
+.idea/
+.DS_Store
+
+.claude/
+.superpowers/
+.agent/
+./agent
+docs/
+CLAUDE.md
+target/
+*.class
+*.iml

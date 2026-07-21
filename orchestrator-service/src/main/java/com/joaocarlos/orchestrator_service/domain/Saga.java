@@ -2,6 +2,8 @@ package com.joaocarlos.orchestrator_service.domain;
 
 import jakarta.persistence.*;
 import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 
 @Entity
@@ -23,6 +25,10 @@ public class Saga {
     @Column(name = "delivery_address", length = 255)
     private String deliveryAddress;
 
+    @ElementCollection(fetch = FetchType.EAGER)
+    @CollectionTable(name = "saga_items", joinColumns = @JoinColumn(name = "saga_id"))
+    private List<SagaItem> items = new ArrayList<>();
+
     @Column(name = "created_at", nullable = false)
     private LocalDateTime createdAt;
 
@@ -42,6 +48,9 @@ public class Saga {
 
     public String getDeliveryAddress() { return deliveryAddress; }
     public void setDeliveryAddress(String deliveryAddress) { this.deliveryAddress = deliveryAddress; }
+
+    public List<SagaItem> getItems() { return items; }
+    public void setItems(List<SagaItem> items) { this.items = items; }
 
     public LocalDateTime getCreatedAt() { return createdAt; }
     public void setCreatedAt(LocalDateTime createdAt) { this.createdAt = createdAt; }

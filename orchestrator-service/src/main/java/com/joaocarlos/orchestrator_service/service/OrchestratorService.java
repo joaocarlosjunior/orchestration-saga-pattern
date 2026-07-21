@@ -1,6 +1,7 @@
 package com.joaocarlos.orchestrator_service.service;
 
 import com.joaocarlos.orchestrator_service.domain.Saga;
+import com.joaocarlos.orchestrator_service.domain.SagaItem;
 import com.joaocarlos.orchestrator_service.domain.SagaStatus;
 import com.joaocarlos.orchestrator_service.domain.SagaStep;
 import com.joaocarlos.orchestrator_service.messaging.dto.*;
@@ -33,6 +34,12 @@ public class OrchestratorService {
     @Value("${topics.commands-order}")
     private String commandsOrderTopic;
 
+    @Value("${topics.inventory}")
+    private String inventoryTopic;
+
+    @Value("${topics.kitchen-commands}")
+    private String kitchenCommandsTopic;
+
     public OrchestratorService(SagaRepository sagaRepository, KafkaTemplate<String, Object> kafkaTemplate) {
         this.sagaRepository = sagaRepository;
         this.kafkaTemplate = kafkaTemplate;
@@ -50,6 +57,13 @@ public class OrchestratorService {
         saga.setStatus(SagaStatus.STARTED);
         saga.setCurrentStep(SagaStep.KITCHEN);
         saga.setDeliveryAddress(event.deliveryAddress());
+
+        // Salva os itens do pedido no banco do orquestrador
+        List<SagaItem> sagaItems = event.items().stream()
+                .map(i -> new SagaItem(i.productId(), i.quantity()))
+                .toList();
+        saga.setItems(sagaItems);
+
         saga.setCreatedAt(LocalDateTime.now());
         saga.setUpdatedAt(LocalDateTime.now());
         sagaRepository.save(saga);
@@ -71,9 +85,54 @@ public class OrchestratorService {
      */
     @Transactional
     public void handleKitchenPreparing(KitchenCommandEvent event) {
-        logger.info("Cozinha iniciou o preparo do pedido {}", event.orderId());
+        logger.info("Cozinha iniciou o preparo do pedido {}. Solicitando baixa de estoque...", event.orderId());
         updateSaga(event.orderId(), SagaStatus.KITCHEN_PREPARING, SagaStep.KITCHEN);
+
+        Saga saga = sagaRepository.findById(event.orderId()).orElseThrow();
+        List<InventoryCommandEvent.ProductItemEvent> items = saga.getItems().stream()
+                .map(i -> new InventoryCommandEvent.ProductItemEvent(i.getProductId(), i.getQuantity()))
+                .toList();
+
+        InventoryCommandEvent inventoryEvent = new InventoryCommandEvent(
+                event.orderId(),
+                items,
+                Instant.now()
+        );
+        kafkaTemplate.send(inventoryTopic, event.orderId(), inventoryEvent);
+        logger.info("Comando de baixa de estoque enviado para o pedido {}", event.orderId());
+    }
+
+    /**
+     * Callback de sucesso da baixa do estoque.
+     */
+    @Transactional
+    public void handleInventoryDeducted(InventoryResultEvent event) {
+        logger.info("Baixa de estoque confirmada para o pedido {}. Notificando order-service...", event.orderId());
         sendOrderCommand(event.orderId(), "ORDER_PREPARING", null);
+    }
+
+    /**
+     * Callback de falha da baixa do estoque (Compensação).
+     */
+    @Transactional
+    public void handleInventoryFailed(InventoryResultEvent event) {
+        logger.warn("Falha na baixa de estoque para o pedido {}. Motivo: {}. Iniciando compensação...", event.orderId(), event.reason());
+
+        // 1. Atualiza a Saga para FAILED
+        updateSaga(event.orderId(), SagaStatus.FAILED, SagaStep.KITCHEN);
+
+        // 2. Compensa o kitchen-service enviando comando para cancelar/falhar o preparo
+        KitchenCancelCommandEvent cancelCommand = new KitchenCancelCommandEvent(
+                "CANCEL_PREPARING",
+                event.orderId(),
+                "Estoque insuficiente: " + event.reason(),
+                Instant.now()
+        );
+        kafkaTemplate.send(kitchenCommandsTopic, event.orderId(), cancelCommand);
+        logger.info("Comando de cancelamento de preparo enviado para o kitchen-service para o pedido {}", event.orderId());
+
+        // 3. Notifica o order-service que o pedido falhou
+        sendOrderCommand(event.orderId(), "ORDER_FAILURE", "Estoque insuficiente: " + event.reason());
     }
 
     /**

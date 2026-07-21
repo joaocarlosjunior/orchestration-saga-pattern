@@ -27,6 +27,15 @@ public class KafkaTopicConfig {
     @Value("${topics.commands-delivery}")
     private String commandsDeliveryTopic;
 
+    @Value("${topics.inventory}")
+    private String inventoryTopic;
+
+    @Value("${topics.commands-inventory}")
+    private String commandsInventoryTopic;
+
+    @Value("${topics.kitchen-commands}")
+    private String kitchenCommandsTopic;
+
     @Bean
     public NewTopic ordersTopicBean() {
         return TopicBuilder.name(ordersTopic).partitions(1).replicas(1).build();
@@ -55,5 +64,20 @@ public class KafkaTopicConfig {
     @Bean
     public NewTopic commandsDeliveryTopicBean() {
         return TopicBuilder.name(commandsDeliveryTopic).partitions(1).replicas(1).build();
+    }
+
+    @Bean
+    public NewTopic inventoryTopicBean() {
+        return TopicBuilder.name(inventoryTopic).partitions(1).replicas(1).build();
+    }
+
+    @Bean
+    public NewTopic commandsInventoryTopicBean() {
+        return TopicBuilder.name(commandsInventoryTopic).partitions(1).replicas(1).build();
+    }
+
+    @Bean
+    public NewTopic kitchenCommandsTopicBean() {
+        return TopicBuilder.name(kitchenCommandsTopic).partitions(1).replicas(1).build();
     }
 }

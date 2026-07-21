@@ -44,3 +44,6 @@ topics:
   commands-order: commands-order
   commands-kitchen: commands-kitchen
   commands-delivery: commands-delivery
+  inventory: inventory-topic
+  commands-inventory: commands-inventory
+  kitchen-commands: kitchen-commands-topic

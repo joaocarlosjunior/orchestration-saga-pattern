@@ -15,6 +15,7 @@ Implementação de um sistema de pedidos distribuído utilizando o **Saga Patter
   - [Order Service](#order-service)
   - [Kitchen Service](#kitchen-service)
   - [Delivery Service](#delivery-service)
+  - [Inventory Service](#inventory-service)
   - [Saga Orchestrator](#saga-orchestrator)
 - [Fluxos da Saga](#fluxos-da-saga)
   - [Happy Path - Pedido Concluído com Sucesso](#happy-path---pedido-concluído-com-sucesso)
@@ -36,6 +37,7 @@ Implementação de um sistema de pedidos distribuído utilizando o **Saga Patter
 | **Order Service** | Java 17, Spring Boot 3.3.1, JPA / Hibernate, H2 Database (Memória) |
 | **Kitchen Service** | Java 17, Spring Boot 3.3.1, JPA / Hibernate, H2 Database (Memória) |
 | **Delivery Service** | Java 17, Spring Boot 3.3.1, JPA / Hibernate, H2 Database (Memória) |
+| **Inventory Service** | Java 17, Spring Boot 3.3.1, JPA / Hibernate, H2 Database (Memória) |
 | **Saga Orchestrator** | Java 17, Spring Boot 3.3.1, JPA / Hibernate, H2 Database (Memória) |
 | **Mensageria** | Apache Kafka (KRaft mode via Docker Compose) |
 | **Idempotência** | Constraint de Banco de Dados (`idempotency_key UNIQUE`) |
@@ -138,6 +140,38 @@ delivery-service/
 
 ---
 
+### Inventory Service
+**Porta:** `8085` | **Banco:** H2 (`jdbc:h2:mem:inventorydb`) | **Linguagem:** Java (Spring Boot)
+
+Controla o estoque físico de ingredientes (matéria-prima) necessários para a confecção dos pratos do restaurante e gerencia as receitas/composição de cada produto oferecido no cardápio.
+
+**Responsabilidades:**
+*   Registrar insumos/ingredientes e gerenciar seus saldos de estoque
+*   Permitir reabastecimento via rota REST dedicada
+*   Registrar receitas mapeando produtos do cardápio a um conjunto de insumos
+*   Consumir comandos de baixa de estoque do tópico `inventory-topic`
+*   Realizar a dedução de estoque de forma transacional e atômica
+*   Publicar o resultado da baixa (`INVENTORY_DEDUCTED`, `INVENTORY_FAILED`) no tópico `commands-inventory`
+
+**Estrutura de Diretórios:**
+```
+inventory-service/
+├── pom.xml
+└── src/main/java/com/joaocarlos/inventory_service/
+    ├── InventoryServiceApplication.java
+    ├── controller/                  # Endpoints REST de ingredientes e receitas
+    ├── domain/                      # Entidades JPA (Ingredient, RecipeItem)
+    ├── dto/                         # DTOs REST (IngredientRequest, RecipeRequest, etc.)
+    ├── exception/                   # Exceptions locais e handler global
+    ├── repository/                  # Repositories (IngredientRepository, RecipeItemRepository)
+    ├── service/                     # Lógica de controle e dedução
+    └── messaging/                   # Integração com Kafka
+        ├── InventoryCommandConsumer.java
+        └── dto/                     # DTOs de eventos (InventoryCommandEvent, etc.)
+```
+
+---
+
 ### Saga Orchestrator
 **Porta:** `8082` | **Banco:** H2 (`jdbc:h2:mem:orchestratordb`) | **Linguagem:** Java (Spring Boot)
 
@@ -176,148 +210,205 @@ orchestrator-service/
 O diagrama abaixo apresenta o caminho ideal, desde a requisição HTTP inicial do cliente até a confirmação de entrega concluída.
 
 ```
-Cliente           order-service        orchestrator-service       kitchen-service       delivery-service
-   │                    │                       │                        │                      │
-   │ POST /api/v1/orders│                       │                        │                      │
-   │───────────────────>│                       │                        │                      │
-   │    201 Created     │                       │                        │                      │
-   │<───────────────────│                       │                        │                      │
-   │                    │                       │                        │                      │
-   │                    │     orders-topic      │                        │                      │
-   │                    │    (Pedido Criado)    │                        │                      │
-   │                    │──────────────────────>│                        │                      │
-   │                    │                       │ Inicia Saga (STARTED)  │                      │
-   │                    │                       │                        │                      │
-   │                    │    commands-order     │                        │                      │
-   │                    │(ORDER_WAITING_KITCHEN)│                        │                      │
-   │                    │<──────────────────────│                        │                      │
-   │                    │                       │                        │                      │
-   │                    │                       │     kitchen-topic      │                      │
-   │                    │                       │   (Ordem Produção)     │                      │
-   │                    │                       │───────────────────────>│                      │
-   │                    │                       │                        │ Salva PENDING        │
-   │                    │                       │                        │                      │
-   │                    │                       │                        │ Operador Cozinha     │
-   │                    │                       │                        │ POST /confirm        │
-   │                    │                       │                        │                      │
-   │                    │                       │    commands-kitchen    │                      │
-   │                    │                       │  (KITCHEN_PREPARING)   │                      │
-   │                    │                       │<───────────────────────│                      │
-   │                    │    commands-order     │                        │                      │
-   │                    │   (ORDER_PREPARING)   │                        │                      │
-   │                    │<──────────────────────│                        │                      │
-   │                    │                       │                        │ Operador Cozinha     │
-   │                    │                       │                        │ POST /ready          │
-   │                    │                       │                        │                      │
-   │                    │                       │    commands-kitchen    │                      │
-   │                    │                       │  (KITCHEN_CONFIRMED)   │                      │
-   │                    │                       │<───────────────────────│                      │
-   │                    │                       │ Transiciona p/         │                      │
-   │                    │                       │ KITCHEN_CONFIRMED      │                      │
-   │                    │                       │                        │                      │
-   │                    │                       │     delivery-topic     │                      │
-   │                    │                       │    (Ordem Entrega)     │                      │
-   │                    │                       │──────────────────────────────────────────────>│
-   │                    │                       │                        │                      │ Salva PENDING
-   │                    │                       │                        │                      │
-   │                    │                       │                        │                      │ Entregador
-   │                    │                       │                        │                      │ POST /start
-   │                    │                       │                        │                      │
-   │                    │                       │    commands-delivery   │                      │
-   │                    │                       │   (DELIVERY_STARTED)   │                      │
-   │                    │                       │<──────────────────────────────────────────────│
-   │                    │    commands-order     │                        │                      │
-   │                    │   (ORDER_DELIVERING)  │                        │                      │
-   │                    │<──────────────────────│                        │                      │
-   │                    │                       │                        │                      │ Entregador
-   │                    │                       │                        │                      │ POST /complete
-   │                    │                       │                        │                      │
-   │                    │                       │    commands-delivery   │                      │
-   │                    │                       │  (DELIVERY_CONFIRMED)  │                      │
-   │                    │                       │<──────────────────────────────────────────────│
-   │                    │                       │ Finaliza Saga          │                      │
-   │                    │                       │ (COMPLETED)            │                      │
-   │                    │                       │                        │                      │
-   │                    │    commands-order     │                        │                      │
-   │                    │    (ORDER_SUCCESS)    │                        │                      │
-   │                    │<──────────────────────│                        │                      │
-   │                    │                       │                        │                      │
-   │                    │  Pedido: SUCCESS      │                        │                      │
+Cliente        order-service       orchestrator-service      kitchen-service      inventory-service     delivery-service
+   │                 │                      │                       │                    │                     │
+   │ POST /orders    │                      │                       │                    │                     │
+   │────────────────>│                      │                       │                    │                     │
+   │   201 Created   │                      │                       │                    │                     │
+   │<────────────────│                      │                       │                    │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │     orders-topic     │                       │                    │                     │
+   │                 │   (Pedido Criado)    │                       │                    │                     │
+   │                 │─────────────────────>│                       │                    │                     │
+   │                 │                      │ Inicia Saga (STARTED) │                    │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │    commands-order    │                       │                    │                     │
+   │                 │(ORDER_WAITING_KITCHEN)│                      │                    │                     │
+   │                 │<─────────────────────│                       │                    │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │                      │     kitchen-topic     │                    │                     │
+   │                 │                      │   (Ordem Produção)    │                    │                     │
+   │                 │                      │──────────────────────>│                    │                     │
+   │                 │                      │                       │ Salva PENDING      │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │                      │                       │ Operador Cozinha   │                     │
+   │                 │                      │                       │ POST /confirm      │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │                      │    commands-kitchen   │                    │                     │
+   │                 │                      │  (KITCHEN_PREPARING)  │                    │                     │
+   │                 │                      │<──────────────────────│                    │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │                      │    inventory-topic    │                    │                     │
+   │                 │                      │   (Baixa Estoque)     │                    │                     │
+   │                 │                      │───────────────────────────────────────────>│                     │
+   │                 │                      │                       │                    │ Deduz insumos       │
+   │                 │                      │                       │                    │                     │
+   │                 │                      │   commands-inventory  │                    │                     │
+   │                 │                      │  (INVENTORY_DEDUCTED) │                    │                     │
+   │                 │                      │<───────────────────────────────────────────│                     │
+   │                 │                      │                       │                    │                     │
+   │                 │    commands-order    │                       │                    │                     │
+   │                 │   (ORDER_PREPARING)  │                       │                    │                     │
+   │                 │<─────────────────────│                       │                    │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │                      │                       │ Operador Cozinha   │                     │
+   │                 │                      │                       │ POST /ready        │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │                      │    commands-kitchen   │                    │                     │
+   │                 │                      │  (KITCHEN_CONFIRMED)  │                    │                     │
+   │                 │                      │<──────────────────────│                    │                     │
+   │                 │                      │ Transiciona p/        │                    │                     │
+   │                 │                      │ KITCHEN_CONFIRMED     │                    │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │                      │     delivery-topic    │                    │                     │
+   │                 │                      │    (Ordem Entrega)    │                    │                     │
+   │                 │                      │─────────────────────────────────────────────────────────────────>│
+   │                 │                      │                       │                    │                     │ Salva PENDING
+   │                 │                      │                       │                    │                     │
+   │                 │                      │                       │                    │                     │ Entregador
+   │                 │                      │                       │                    │                     │ POST /start
+   │                 │                      │                       │                    │                     │
+   │                 │                      │   commands-delivery   │                    │                     │
+   │                 │                      │   (DELIVERY_STARTED)  │                    │                     │
+   │                 │                      │<─────────────────────────────────────────────────────────────────│
+   │                 │    commands-order    │                       │                    │                     │
+   │                 │  (ORDER_DELIVERING)  │                       │                    │                     │
+   │                 │<─────────────────────│                       │                    │                     │
+   │                 │                      │                       │                    │                     │ Entregador
+   │                 │                      │                       │                    │                     │ POST /complete
+   │                 │                      │                       │                    │                     │
+   │                 │                      │   commands-delivery   │                    │                     │
+   │                 │                      │  (DELIVERY_CONFIRMED) │                    │                     │
+   │                 │                      │<─────────────────────────────────────────────────────────────────│
+   │                 │                      │ Finaliza Saga         │                    │                     │
+   │                 │                      │ (COMPLETED)           │                    │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │    commands-order    │                       │                    │                     │
+   │                 │    (ORDER_SUCCESS)   │                       │                    │                     │
+   │                 │<─────────────────────│                       │                    │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │  Pedido: SUCCESS     │                       │                    │                     │
+```
+
+---
+
+### Compensação - Falha na Baixa de Estoque (Inventário)
+
+Se a cozinha confirmar o preparo físico do pedido, mas a baixa de ingredientes no `inventory-service` falhar (por exemplo, por insuficiência de estoque), o orquestrador cancela o preparo na cozinha (compensação) e encerra o pedido como falha.
+
+```
+Cliente        order-service       orchestrator-service      kitchen-service      inventory-service     delivery-service
+   │                 │                      │                       │                    │                     │
+   │ POST /orders    │                      │                       │                    │                     │
+   │────────────────>│                      │                       │                    │                     │
+   │                 │     orders-topic     │                       │                    │                     │
+   │                 │─────────────────────>│                       │                    │                     │
+   │                 │                      │     kitchen-topic     │                    │                     │
+   │                 │                      │──────────────────────>│                    │                     │
+   │                 │                      │                       │ Salva PENDING      │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │                      │                       │ Operador Cozinha   │                     │
+   │                 │                      │                       │ POST /confirm      │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │                      │    commands-kitchen   │                    │                     │
+   │                 │                      │  (KITCHEN_PREPARING)  │                    │                     │
+   │                 │                      │<──────────────────────│                    │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │                      │    inventory-topic    │                    │                     │
+   │                 │                      │   (Baixa Estoque)     │                    │                     │
+   │                 │                      │───────────────────────────────────────────>│                     │
+   │                 │                      │                       │                    │ Estoque             │
+   │                 │                      │                       │                    │ Insuficiente        │
+   │                 │                      │   commands-inventory  │                    │                     │
+   │                 │                      │   (INVENTORY_FAILED)  │                    │                     │
+   │                 │                      │<───────────────────────────────────────────│                     │
+   │                 │                      │                       │                    │                     │
+   │                 │                      │   kitchen-commands    │                    │                     │
+   │                 │                      │  (CANCEL_PREPARING)   │                    │                     │
+   │                 │                      │──────────────────────>│                    │                     │
+   │                 │                      │                       │ Transiciona p/     │                     │
+   │                 │                      │                       │ FAILED             │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │    commands-order    │                       │                    │                     │
+   │                 │   (ORDER_FAILURE +   │                       │                    │                     │
+   │                 │     justificativa)   │                       │                    │                     │
+   │                 │<─────────────────────│                       │                    │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │  Pedido: FAILURE     │                       │                    │                     │
 ```
 
 ---
 
 ### Compensação - Falha ou Rejeição na Cozinha
 
-Se ocorrer uma falha de negócio automática (item inválido) ou uma rejeição manual por parte da equipe da cozinha, a Saga é compensada e o pedido finalizado como falha.
+Se ocorrer uma falha de negócio automática (item inválido) ou uma rejeição manual por parte da equipe da cozinha *antes* de iniciar a confecção, a Saga é compensada e o pedido finalizado como falha (sem envolver o inventário).
 
 ```
-Cliente           order-service        orchestrator-service       kitchen-service
-   │                    │                       │                        │
-   │ POST /api/v1/orders│                       │                        │
-   │───────────────────>│                       │                        │
-   │                    │     orders-topic      │                        │
-   │                    │──────────────────────>│                        │
-   │                    │                       │                        │
-   │                    │    commands-order     │                        │
-   │                    │(ORDER_WAITING_KITCHEN)│                        │
-   │                    │<──────────────────────│                        │
-   │                    │                       │     kitchen-topic      │
-   │                    │                       │───────────────────────>│
-   │                    │                       │                        │ Rejeição Manual ou
-   │                    │                       │                        │ item "999" (Inválido)
-   │                    │                       │                        │
-   │                    │                       │    commands-kitchen    │
-   │                    │                       │    (KITCHEN_FAILED)    │
-   │                    │                       │<───────────────────────│
-   │                    │                       │ Transiciona p/ FAILED  │
-   │                    │                       │                        │
-   │                    │    commands-order     │                        │
-   │                    │    (ORDER_FAILURE)    │                        │
-   │                    │<──────────────────────│                        │
-   │                    │                       │                        │
-   │                    │ Pedido: FAILURE       │                        │
+Cliente        order-service       orchestrator-service      kitchen-service      inventory-service     delivery-service
+   │                 │                      │                       │                    │                     │
+   │ POST /orders    │                      │                       │                    │                     │
+   │────────────────>│                      │                       │                    │                     │
+   │                 │     orders-topic     │                       │                    │                     │
+   │                 │─────────────────────>│                       │                    │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │    commands-order    │                       │                    │                     │
+   │                 │(ORDER_WAITING_KITCHEN)│                      │                    │                     │
+   │                 │<─────────────────────│                       │                    │                     │
+   │                 │                      │     kitchen-topic     │                    │                     │
+   │                 │                      │──────────────────────>│                    │                     │
+   │                 │                      │                       │ Rejeição Manual ou │                     │
+   │                 │                      │                       │ item "999" (Falha) │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │                      │    commands-kitchen   │                    │                     │
+   │                 │                      │    (KITCHEN_FAILED)   │                    │                     │
+   │                 │                      │<──────────────────────│                    │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │    commands-order    │                       │                    │                     │
+   │                 │    (ORDER_FAILURE)   │                       │                    │                     │
+   │                 │<─────────────────────│                       │                    │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │  Pedido: FAILURE     │                       │                    │                     │
 ```
 
 ---
 
 ### Compensação - Falha na Entrega
 
-Se a cozinha concluir o prato com sucesso, mas o entregador registrar uma falha manual (cliente ausente) ou automática (endereço de simulação `"FAIL"`), a entrega é marcada como `FAILED` e a Saga encerra o pedido como `FAILURE` no `order-service`.
+Se a cozinha concluir o prato com sucesso, mas o entregador registrar uma falha manual (cliente ausente) ou automática (endereço de simulação `"FAIL"`), a entrega é marcada como `FAILED` e a Saga encerra o pedido como `FAILURE` no `order-service` (ingredientes são considerados desperdiçados e não estornados).
 
 ```
-Cliente           order-service        orchestrator-service       kitchen-service       delivery-service
-   │                    │                       │                        │                      │
-   │                    │                       │ ... (Cozinha concluída)│                      │
-   │                    │                       │                        │                      │
-   │                    │                       │     delivery-topic     │                      │
-   │                    │                       │──────────────────────────────────────────────>│
-   │                    │                       │                        │                      │ Salva PENDING
-   │                    │                       │                        │                      │
-   │                    │                       │                        │                      │ Entregador
-   │                    │                       │                        │                      │ POST /start
-   │                    │                       │                        │                      │
-   │                    │                       │    commands-delivery   │                      │
-   │                    │                       │   (DELIVERY_STARTED)   │                      │
-   │                    │                       │<──────────────────────────────────────────────│
-   │                    │    commands-order     │                        │                      │
-   │                    │   (ORDER_DELIVERING)  │                        │                      │
-   │                    │<──────────────────────│                        │                      │
-   │                    │                       │                        │                      │ Ocorre problema.
-   │                    │                       │                        │                      │ Entregador chama
-   │                    │                       │                        │                      │ POST /fail (motivo)
-   │                    │                       │                        │                      │
-   │                    │                       │    commands-delivery   │                      │
-   │                    │                       │    (DELIVERY_FAILED)   │                      │
-   │                    │                       │<──────────────────────────────────────────────│
-   │                    │                       │ Finaliza Saga (FAILED) │                      │
-   │                    │                       │                        │                      │
-   │                    │    commands-order     │                        │                      │
-   │                    │   (ORDER_FAILURE +    │                        │                      │
-   │                    │       justificativa)  │                        │                      │
-   │                    │<──────────────────────│                        │                      │
-   │                    │                       │                        │                      │
-   │                    │ Pedido: FAILURE       │                        │                      │
+Cliente        order-service       orchestrator-service      kitchen-service      inventory-service     delivery-service
+   │                 │                      │                       │                    │                     │
+   │                 │                      │ ... (Cozinha e        │                    │                     │
+   │                 │                      │ estoque concluídos)   │                    │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │                      │     delivery-topic    │                    │                     │
+   │                 │                      │    (Ordem Entrega)    │                    │                     │
+   │                 │                      │─────────────────────────────────────────────────────────────────>│
+   │                 │                      │                       │                    │                     │ Salva PENDING
+   │                 │                      │                       │                    │                     │
+   │                 │                      │                       │                    │                     │ Entregador
+   │                 │                      │                       │                    │                     │ POST /start
+   │                 │                      │                       │                    │                     │
+   │                 │                      │   commands-delivery   │                    │                     │
+   │                 │                      │   (DELIVERY_STARTED)  │                    │                     │
+   │                 │                      │<─────────────────────────────────────────────────────────────────│
+   │                 │    commands-order    │                       │                    │                     │
+   │                 │  (ORDER_DELIVERING)  │                       │                    │                     │
+   │                 │<─────────────────────│                       │                    │                     │
+   │                 │                      │                       │                    │                     │ Ocorre problema.
+   │                 │                      │                       │                    │                     │ Entregador chama
+   │                 │                      │                       │                    │                     │ POST /fail (motivo)
+   │                 │                      │                       │                    │                     │
+   │                 │                      │   commands-delivery   │                    │                     │
+   │                 │                      │   (DELIVERY_FAILED)   │                    │                     │
+   │                 │                      │<─────────────────────────────────────────────────────────────────│
+   │                 │    commands-order    │                       │                    │                     │
+   │                 │   (ORDER_FAILURE +   │                       │                    │                     │
+   │                 │     justificativa)   │                       │                    │                     │
+   │                 │<─────────────────────│                       │                    │                     │
+   │                 │                      │                       │                    │                     │
+   │                 │  Pedido: FAILURE     │                       │                    │                     │
 ```
 
 ---
@@ -329,12 +420,14 @@ O `orchestrator-service` armazena e altera o estado da transação de forma cent
 | Estado Atual (Saga) | Evento Consumido | Próximo Estado | Próximo Passo (`currentStep`) | Comando/Evento Emitido | Descrição |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | `-` | Novo pedido no `orders-topic` | `STARTED` | `KITCHEN` | `ORDER_WAITING_KITCHEN` & `kitchen-topic` | Inicialização da Saga de Pedidos |
-| `STARTED` | `KITCHEN_PREPARING` | `KITCHEN_PREPARING` | `KITCHEN` | `ORDER_PREPARING` | Preparação iniciada pela equipe de cozinha |
+| `STARTED` | `KITCHEN_PREPARING` | `KITCHEN_PREPARING` | `KITCHEN` | `inventory-topic` | Preparação iniciada; orquestrador solicita baixa de estoque |
+| `KITCHEN_PREPARING` | `INVENTORY_DEDUCTED` | `KITCHEN_PREPARING` | `KITCHEN` | `ORDER_PREPARING` | Estoque baixado com sucesso; notifica order-service de preparo |
+| `KITCHEN_PREPARING` | `INVENTORY_FAILED` | `FAILED` | `KITCHEN` | `kitchen-commands-topic` & `ORDER_FAILURE` | Estoque insuficiente; cancela cozinha e falha pedido |
 | `KITCHEN_PREPARING` | `KITCHEN_CONFIRMED` | `KITCHEN_CONFIRMED` | `DELIVERY` | `delivery-topic` | Comida pronta na cozinha; enviada para o delivery |
-| `STARTED` / `KITCHEN_PREPARING` | `KITCHEN_FAILED` | `FAILED` | `KITCHEN` | `ORDER_FAILURE` | Cancelamento ou falha no preparo do pedido |
+| `STARTED` / `KITCHEN_PREPARING` | `KITCHEN_FAILED` | `FAILED` | `KITCHEN` | `ORDER_FAILURE` | Cancelamento ou falha no preparo do pedido pela cozinha |
 | `KITCHEN_CONFIRMED` | `DELIVERY_STARTED` | `KITCHEN_CONFIRMED` | `DELIVERY` | `ORDER_DELIVERING` | Pedido em trânsito de entrega com o entregador |
 | `KITCHEN_CONFIRMED` | `DELIVERY_CONFIRMED`| `COMPLETED` | `DELIVERY` | `ORDER_SUCCESS` | Pedido entregue e Saga concluída com sucesso |
-| `KITCHEN_CONFIRMED` | `DELIVERY_FAILED` | `FAILED` | `DELIVERY` | `ORDER_FAILURE` | Falha logística na entrega; compensação aplicada |
+| `KITCHEN_CONFIRMED` | `DELIVERY_FAILED` | `FAILED` | `DELIVERY` | `ORDER_FAILURE` | Falha logística na entrega; compensação aplicada (perda de estoque) |
 
 ---
 
@@ -348,6 +441,9 @@ O `orchestrator-service` armazena e altera o estado da transação de forma cent
 | `delivery-topic` | `orchestrator-service` | `delivery-service` | Dispara a ordem de logística de entrega. |
 | `commands-delivery` | `delivery-service` | `orchestrator-service` | Envia as atualizações de logística (`STARTED`, `CONFIRMED`, `FAILED`). |
 | `commands-order` | `orchestrator-service` | `order-service` | Envia as atualizações de status que serão expostas ao cliente. |
+| `inventory-topic` | `orchestrator-service` | `inventory-service` | Dispara o comando para dedução de ingredientes do estoque. |
+| `commands-inventory` | `inventory-service` | `orchestrator-service` | Notifica o resultado da baixa de estoque (`INVENTORY_DEDUCTED`, `INVENTORY_FAILED`). |
+| `kitchen-commands-topic` | `orchestrator-service` | `kitchen-service` | Dispara comandos de compensação para a cozinha (como cancelamento de preparo). |
 
 ---
 
@@ -421,6 +517,25 @@ CREATE TABLE deliveries (
 );
 ```
 
+### 5. `inventory-service` (`inventorydb`)
+```sql
+CREATE TABLE ingredients (
+    id VARCHAR(50) PRIMARY KEY,
+    name VARCHAR(100) NOT NULL,
+    available_quantity INT NOT NULL
+);
+
+CREATE TABLE recipes (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    product_id VARCHAR(50) NOT NULL,
+    ingredient_id VARCHAR(50) NOT NULL,
+    quantity INT NOT NULL,
+    FOREIGN KEY (ingredient_id) REFERENCES ingredients(id) ON DELETE CASCADE,
+    UNIQUE (product_id, ingredient_id)
+);
+```
+
+
 ---
 
 ## ⚡ Patterns Implementados
@@ -468,6 +583,13 @@ Tolerância local a falhas transitórias em cada consumidor Kafka:
 | `POST` | `/api/v1/deliveries/{id}/complete`| - | Confirma a entrega concluída com sucesso no endereço. |
 | `POST` | `/api/v1/deliveries/{id}/fail` | `{ "reason": "texto" }` | Reporta uma falha manual na tentativa de entrega com justificativa. |
 
+### Inventory Service (Porta 8085)
+| Método | Rota | Payload (JSON) | Descrição |
+|---|---|---|---|
+| `POST` | `/api/v1/inventory/ingredients` | `{ "id": "insumo-x", "name": "Nome", "availableQuantity": 100 }` | Cadastra um novo insumo no estoque. |
+| `POST` | `/api/v1/inventory/ingredients/{id}/add-stock` | `{ "quantity": 10 }` | Adiciona/reabastece unidades do estoque do insumo. |
+| `POST` | `/api/v1/inventory/recipes` | `{ "productId": "prod-101", "ingredients": [ { "ingredientId": "insumo-x", "quantity": 2 } ] }` | Associa uma receita (composição) para confecção de um prato. |
+
 ---
 
 ## 🚀 Como Executar
@@ -502,9 +624,47 @@ mvn spring-boot:run
 # Terminal 4: Iniciar Delivery Service (Porta 8084)
 cd delivery-service
 mvn spring-boot:run
+
+# Terminal 5: Iniciar Inventory Service (Porta 8085)
+cd inventory-service
+mvn spring-boot:run
 ```
 
 ### 3. Roteiro Fim a Fim de Teste Feliz
+
+0.  **Cadastrar Estoque e Receita (Antes de criar o pedido)**:
+    Primeiro, inicialize o estoque de ingredientes e associe-os a um prato (`prod-101`):
+    ```bash
+    # Cadastrar ingrediente: Massa de Pizza
+    curl -X POST http://localhost:8085/api/v1/inventory/ingredients \
+      -H "Content-Type: application/json" \
+      -d '{
+        "id": "ing-dough",
+        "name": "Massa de Pizza",
+        "availableQuantity": 10
+      }'
+      
+    # Cadastrar ingrediente: Pepperoni
+    curl -X POST http://localhost:8085/api/v1/inventory/ingredients \
+      -H "Content-Type: application/json" \
+      -d '{
+        "id": "ing-pepperoni",
+        "name": "Fatias de Pepperoni",
+        "availableQuantity": 100
+      }'
+
+    # Cadastrar a receita do prato "prod-101" (Pizza de Pepperoni)
+    # Requer 1 Massa e 20 Pepperonis por pizza
+    curl -X POST http://localhost:8085/api/v1/inventory/recipes \
+      -H "Content-Type: application/json" \
+      -d '{
+        "productId": "prod-101",
+        "ingredients": [
+          { "ingredientId": "ing-dough", "quantity": 1 },
+          { "ingredientId": "ing-pepperoni", "quantity": 20 }
+        ]
+      }'
+    ```
 
 1.  **Criar o Pedido**:
     ```bash

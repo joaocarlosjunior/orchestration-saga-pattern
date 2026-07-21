@@ -1,12 +1,12 @@
 server:
-  port: 8083
+  port: 8085
 
 spring:
   application:
-    name: kitchen-service
+    name: inventory-service
 
   datasource:
-    url: jdbc:h2:mem:kitchendb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
+    url: jdbc:h2:mem:inventorydb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE
     driver-class-name: org.h2.Driver
     username: sa
     password:
@@ -30,7 +30,7 @@ spring:
       properties:
         spring.json.add.type.headers: false
     consumer:
-      group-id: kitchen-service-group
+      group-id: inventory-service-group
       auto-offset-reset: earliest
       key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
@@ -38,6 +38,5 @@ spring:
         spring.json.trusted.packages: "*"
 
 topics:
-  kitchen: kitchen-topic
-  commands-kitchen: commands-kitchen
-  kitchen-commands: kitchen-commands-topic
+  inventory: inventory-topic
+  commands-inventory: commands-inventory

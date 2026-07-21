@@ -98,6 +98,20 @@ public class KitchenService {
     }
 
     /**
+     * Compensação: Cancela o preparo do pedido se a baixa de estoque falhar.
+     */
+    @Transactional
+    public void cancelPreparing(String orderId, String reason) {
+        KitchenOrder order = findOrThrow(orderId);
+        if (order.getStatus() != KitchenOrderStatus.PREPARING && order.getStatus() != KitchenOrderStatus.PENDING) {
+            throw new IllegalStateException("Pedido não pode ser cancelado na cozinha no estado atual: " + order.getStatus());
+        }
+        order.setStatus(KitchenOrderStatus.FAILED);
+        kitchenOrderRepository.save(order);
+        logger.info("Pedido {} cancelado na cozinha por falta de estoque. Motivo: {}", orderId, reason);
+    }
+
+    /**
      * Fase 5: Marcar pedido como pronto.
      */
     @Transactional

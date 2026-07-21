@@ -147,6 +147,7 @@ Controla o estoque físico de ingredientes (matéria-prima) necessários para a 
 
 **Responsabilidades:**
 *   Registrar insumos/ingredientes e gerenciar seus saldos de estoque
+*   Registrar categorias e mapear ingredientes a categorias
 *   Permitir reabastecimento via rota REST dedicada
 *   Registrar receitas mapeando produtos do cardápio a um conjunto de insumos
 *   Consumir comandos de baixa de estoque do tópico `inventory-topic`
@@ -159,12 +160,12 @@ inventory-service/
 ├── pom.xml
 └── src/main/java/com/joaocarlos/inventory_service/
     ├── InventoryServiceApplication.java
-    ├── controller/                  # Endpoints REST de ingredientes e receitas
-    ├── domain/                      # Entidades JPA (Ingredient, RecipeItem)
-    ├── dto/                         # DTOs REST (IngredientRequest, RecipeRequest, etc.)
+    ├── controller/                  # Endpoints REST de ingredientes, receitas e categorias
+    ├── domain/                      # Entidades JPA (Ingredient, RecipeItem, Category)
+    ├── dto/                         # DTOs REST (IngredientRequest, RecipeRequest, CategoryRequest, etc.)
     ├── exception/                   # Exceptions locais e handler global
-    ├── repository/                  # Repositories (IngredientRepository, RecipeItemRepository)
-    ├── service/                     # Lógica de controle e dedução
+    ├── repository/                  # Repositories (IngredientRepository, RecipeItemRepository, CategoryRepository)
+    ├── service/                     # Lógica de controle, dedução e categorias
     └── messaging/                   # Integração com Kafka
         ├── InventoryCommandConsumer.java
         └── dto/                     # DTOs de eventos (InventoryCommandEvent, etc.)
@@ -519,16 +520,30 @@ CREATE TABLE deliveries (
 
 ### 5. `inventory-service` (`inventorydb`)
 ```sql
+CREATE TABLE categories (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) UNIQUE NOT NULL
+);
+
 CREATE TABLE ingredients (
-    id VARCHAR(50) PRIMARY KEY,
-    name VARCHAR(100) NOT NULL,
-    available_quantity INT NOT NULL
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(100) UNIQUE NOT NULL,
+    available_quantity INT NOT NULL,
+    version BIGINT NOT NULL
+);
+
+CREATE TABLE ingredient_categories (
+    ingredient_id BIGINT NOT NULL,
+    category_id BIGINT NOT NULL,
+    PRIMARY KEY (ingredient_id, category_id),
+    FOREIGN KEY (ingredient_id) REFERENCES ingredients(id) ON DELETE CASCADE,
+    FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE CASCADE
 );
 
 CREATE TABLE recipes (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     product_id VARCHAR(50) NOT NULL,
-    ingredient_id VARCHAR(50) NOT NULL,
+    ingredient_id BIGINT NOT NULL,
     quantity INT NOT NULL,
     FOREIGN KEY (ingredient_id) REFERENCES ingredients(id) ON DELETE CASCADE,
     UNIQUE (product_id, ingredient_id)
@@ -586,9 +601,12 @@ Tolerância local a falhas transitórias em cada consumidor Kafka:
 ### Inventory Service (Porta 8085)
 | Método | Rota | Payload (JSON) | Descrição |
 |---|---|---|---|
-| `POST` | `/api/v1/inventory/ingredients` | `{ "id": "insumo-x", "name": "Nome", "availableQuantity": 100 }` | Cadastra um novo insumo no estoque. |
-| `POST` | `/api/v1/inventory/ingredients/{id}/add-stock` | `{ "quantity": 10 }` | Adiciona/reabastece unidades do estoque do insumo. |
-| `POST` | `/api/v1/inventory/recipes` | `{ "productId": "prod-101", "ingredients": [ { "ingredientId": "insumo-x", "quantity": 2 } ] }` | Associa uma receita (composição) para confecção de um prato. |
+| `POST` | `/api/v1/categories` | `{ "name": "Nome Categoria" }` | Cadastra uma nova categoria de ingredientes. |
+| `GET` | `/api/v1/categories` | - | Lista todas as categorias cadastradas. |
+| `GET` | `/api/v1/categories/{id}/ingredients` | - | Lista os ingredientes que pertencem a uma categoria. |
+| `POST` | `/api/v1/inventory/ingredients` | `{ "name": "Nome", "availableQuantity": 100, "categoryIds": [1] }` | Cadastra um novo insumo no estoque associado a uma ou mais categorias. |
+| `POST` | `/api/v1/inventory/ingredients/{id}/add-stock` | `{ "quantity": 10 }` | Adiciona/reabastece unidades do estoque do insumo (onde `{id}` é o ID numérico). |
+| `POST` | `/api/v1/inventory/recipes` | `{ "productId": "prod-101", "ingredients": [ { "ingredientId": 1, "quantity": 2 } ] }` | Associa uma receita (composição) para confecção de um prato (onde `ingredientId` é o ID numérico). |
 
 ---
 
@@ -633,35 +651,47 @@ mvn spring-boot:run
 ### 3. Roteiro Fim a Fim de Teste Feliz
 
 0.  **Cadastrar Estoque e Receita (Antes de criar o pedido)**:
-    Primeiro, inicialize o estoque de ingredientes e associe-os a um prato (`prod-101`):
+    Primeiro, cadastre as categorias, o estoque de ingredientes associados e associe-os a um prato (`prod-101`):
     ```bash
-    # Cadastrar ingrediente: Massa de Pizza
+    # 1. Cadastrar categorias necessárias
+    # Cadastrar categoria: Massas (retorna ID 1)
+    curl -X POST http://localhost:8085/api/v1/categories \
+      -H "Content-Type: application/json" \
+      -d '{ "name": "Massas" }'
+
+    # Cadastrar categoria: Frios (retorna ID 2)
+    curl -X POST http://localhost:8085/api/v1/categories \
+      -H "Content-Type: application/json" \
+      -d '{ "name": "Frios" }'
+
+    # 2. Cadastrar ingredientes associados às categorias
+    # Cadastrar ingrediente: Massa de Pizza (categoria ID 1, retorna ingrediente ID 1)
     curl -X POST http://localhost:8085/api/v1/inventory/ingredients \
       -H "Content-Type: application/json" \
       -d '{
-        "id": "ing-dough",
         "name": "Massa de Pizza",
-        "availableQuantity": 10
+        "availableQuantity": 10,
+        "categoryIds": [1]
       }'
       
-    # Cadastrar ingrediente: Pepperoni
+    # Cadastrar ingrediente: Pepperoni (categoria ID 2, retorna ingrediente ID 2)
     curl -X POST http://localhost:8085/api/v1/inventory/ingredients \
       -H "Content-Type: application/json" \
       -d '{
-        "id": "ing-pepperoni",
         "name": "Fatias de Pepperoni",
-        "availableQuantity": 100
+        "availableQuantity": 100,
+        "categoryIds": [2]
       }'
 
-    # Cadastrar a receita do prato "prod-101" (Pizza de Pepperoni)
-    # Requer 1 Massa e 20 Pepperonis por pizza
+    # 3. Cadastrar a receita do prato "prod-101" (Pizza de Pepperoni)
+    # Requer 1 Massa (ID 1) e 20 Pepperonis (ID 2) por pizza
     curl -X POST http://localhost:8085/api/v1/inventory/recipes \
       -H "Content-Type: application/json" \
       -d '{
         "productId": "prod-101",
         "ingredients": [
-          { "ingredientId": "ing-dough", "quantity": 1 },
-          { "ingredientId": "ing-pepperoni", "quantity": 20 }
+          { "ingredientId": 1, "quantity": 1 },
+          { "ingredientId": 2, "quantity": 20 }
         ]
       }'
     ```

@@ -6,11 +6,11 @@ import com.joaocarlos.inventory_service.service.InventoryService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.kafka.annotation.BackOff;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.kafka.annotation.RetryableTopic;
 import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.kafka.retrytopic.TopicSuffixingStrategy;
-import org.springframework.retry.annotation.Backoff;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -34,7 +34,7 @@ public class InventoryCommandConsumer {
 
     @RetryableTopic(
             attempts = "3",
-            backoff = @Backoff(delay = 1000, multiplier = 2.0),
+            backOff = @BackOff(delay = 1000, multiplier = 2.0),
             topicSuffixingStrategy = TopicSuffixingStrategy.SUFFIX_WITH_INDEX_VALUE,
             autoCreateTopics = "true"
     )
